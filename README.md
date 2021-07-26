@@ -1,3 +1,9 @@
+Created a copy of inference.py named inferenceCopy.py  
+Changed inferenceCopy.py to suit the desired callable inference function  
+Created inferencefunc.py which runs the lip sync using a callable function 'Wave2LipFunc' taking model, video/face, and audio path as arguments  
+To run the callable function succesfully, make sure checkpoints folder contains model.pth file and face_detection/detection/sfd folder contains s3fd.pth file (model for face detection)  
+
+
 # **Wav2Lip**: *Accurately Lip-syncing Videos In The Wild*
 
 For commercial requests, please contact us at radrabha.m@research.iiit.ac.in or prajwal.k@research.iiit.ac.in. We have an HD model ready that can be used commercially.
