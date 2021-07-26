@@ -11,12 +11,12 @@ import platform
 parser = argparse.ArgumentParser(description='Inference code to lip-sync videos in the wild using Wav2Lip models')
 
 parser.add_argument('--checkpoint_path', type=str, 
-					help='Name of saved checkpoint to load weights from', required=True)
+					help='Name of saved checkpoint to load weights from', default = 'checkpoints/wav2lip_gan.pth',required=False)
 
 parser.add_argument('--face', type=str, 
-					help='Filepath of video/image that contains faces to use', required=True)
+					help='Filepath of video/image that contains faces to use', default = '../sample_data/check.mp4',required=False)
 parser.add_argument('--audio', type=str, 
-					help='Filepath of video/audio file to use as raw audio source', required=True)
+					help='Filepath of video/audio file to use as raw audio source', default = '../sample_data/tts1.wav',required=False)
 parser.add_argument('--outfile', type=str, help='Video path to save result. See default for an e.g.', 
 								default='results/result_voice.mp4')
 
@@ -52,9 +52,6 @@ parser.add_argument('--nosmooth', default=False, action='store_true',
 
 args = parser.parse_args()
 args.img_size = 96
-
-if os.path.isfile(args.face) and args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
-	args.static = True
 
 def get_smoothened_boxes(boxes, T):
 	for i in range(len(boxes)):
@@ -178,106 +175,105 @@ def load_model(path):
 	model = model.to(device)
 	return model.eval()
 
-def main():
-	if not os.path.isfile(args.face):
-		raise ValueError('--face argument must be a valid path to video/image file')
+def Wav2LipFunc(checkpoint_path, face, audiofile):
 
-	elif args.face.split('.')[1] in ['jpg', 'png', 'jpeg']:
-		full_frames = [cv2.imread(args.face)]
-		fps = args.fps
+    if os.path.isfile(face) and face.split('.')[1] in ['jpg', 'png', 'jpeg']:
+	    args.static = True
 
-	else:
-		video_stream = cv2.VideoCapture(args.face)
-		fps = video_stream.get(cv2.CAP_PROP_FPS)
+    if not os.path.isfile(face):
+        raise ValueError('--face argument must be a valid path to video/image file')
+    
+    elif face.split('.')[1] in ['jpg','png','jpeg']:
+        full_frames = [cv2.imread(face)]
+        fps = args.fps
 
-		print('Reading video frames...')
+    else:
+        video_stream = cv2.VideoCapture(face)
+        fps = video_stream.get(cv2.CAP_PROP_FPS)
 
-		full_frames = []
-		while 1:
-			still_reading, frame = video_stream.read()
-			if not still_reading:
-				video_stream.release()
-				break
-			if args.resize_factor > 1:
-				frame = cv2.resize(frame, (frame.shape[1]//args.resize_factor, frame.shape[0]//args.resize_factor))
+        print('Reading video frames...')
 
-			if args.rotate:
-				frame = cv2.rotate(frame, cv2.cv2.ROTATE_90_CLOCKWISE)
+        full_frames = []
+        while 1:
+            still_reading, frame  = video_stream.read()
+            if not still_reading:
+                video_stream.release()
+                break
+            if args.resize_factor >1:
+                frame = cv2.resize(frame, (frame.shape[1]//args.resize_factor, frame.shape[0]//args.resize_factor))
+            if args.rotate:
+                frame = cv2.rotate(frame, cv2.cv2.ROTATE_90_CLOCKWISE)
+            
+            y1, y2, x1, x2 = args.crop
+            if x2 == -1: x2 = frame.shape[1]
+            if y2 == -1: y2 = frame.shape[0]
 
-			y1, y2, x1, x2 = args.crop
-			if x2 == -1: x2 = frame.shape[1]
-			if y2 == -1: y2 = frame.shape[0]
+            frame = frame[y1:y2, x1:x2]
+            full_frames.append(frame)
+    
+    print ("Number of frames available for inference: "+str(len(full_frames)))
 
-			frame = frame[y1:y2, x1:x2]
+    if not audiofile.endswith('.wav'):
+        print('Extracting raw audio...')
+        command = 'ffmpeg -y -i {} -strict -2 {}'.format(audiofile, 'temp/temp.wav')
 
-			full_frames.append(frame)
+        subprocess.call(command, shell=True)
+        audiofile = 'temp/temp.wav'
 
-	print ("Number of frames available for inference: "+str(len(full_frames)))
+    wav = audio.load_wav(audiofile, 16000)
+    mel = audio.melspectrogram(wav)
+    print(mel.shape)
 
-	if not args.audio.endswith('.wav'):
-		print('Extracting raw audio...')
-		command = 'ffmpeg -y -i {} -strict -2 {}'.format(args.audio, 'temp/temp.wav')
+    if np.isnan(mel.reshape(-1)).sum() > 0:
+        raise ValueError('Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
 
-		subprocess.call(command, shell=True)
-		args.audio = 'temp/temp.wav'
+    mel_chunks = []
+    mel_idx_multiplier = 80./fps
+    i=0
 
-	wav = audio.load_wav(args.audio, 16000)
-	mel = audio.melspectrogram(wav)
-	print(mel.shape)
+    while 1:
+	    start_idx = int(i * mel_idx_multiplier)
+	    if start_idx + mel_step_size > len(mel[0]):
+		    mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
+		    break
+	    mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
+	    i += 1
+    
+    print("Length of mel chunks: {}".format(len(mel_chunks)))
+    full_frames = full_frames[:len(mel_chunks)]
 
-	if np.isnan(mel.reshape(-1)).sum() > 0:
-		raise ValueError('Mel contains nan! Using a TTS voice? Add a small epsilon noise to the wav file and try again')
+    batch_size = args.wav2lip_batch_size
+    gen = datagen(full_frames.copy(), mel_chunks)
 
-	mel_chunks = []
-	mel_idx_multiplier = 80./fps 
-	i = 0
-	while 1:
-		start_idx = int(i * mel_idx_multiplier)
-		if start_idx + mel_step_size > len(mel[0]):
-			mel_chunks.append(mel[:, len(mel[0]) - mel_step_size:])
-			break
-		mel_chunks.append(mel[:, start_idx : start_idx + mel_step_size])
-		i += 1
-
-	print("Length of mel chunks: {}".format(len(mel_chunks)))
-
-	full_frames = full_frames[:len(mel_chunks)]
-
-	batch_size = args.wav2lip_batch_size
-	#print(batch_size)
-	#print("\n")
-	gen = datagen(full_frames.copy(), mel_chunks)
-	
-	for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
+    for i, (img_batch, mel_batch, frames, coords) in enumerate(tqdm(gen, 
 											total=int(np.ceil(float(len(mel_chunks))/batch_size)))):
-		#print("No Issues Until here\n")
-		if i == 0:
-			model = load_model(args.checkpoint_path)
-			print ("Model loaded")
+	    if i == 0:
+		    model = load_model(checkpoint_path)
+		    print ("Model loaded")
 
-			frame_h, frame_w = full_frames[0].shape[:-1]
-			out = cv2.VideoWriter('temp/result.avi', 
+		    frame_h, frame_w = full_frames[0].shape[:-1]
+		    out = cv2.VideoWriter('temp/result.avi', 
 									cv2.VideoWriter_fourcc(*'DIVX'), fps, (frame_w, frame_h))
+
+	    img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
+	    mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+
+	    with torch.no_grad():
+		    pred = model(mel_batch, img_batch)
+
+	    pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
 		
-		img_batch = torch.FloatTensor(np.transpose(img_batch, (0, 3, 1, 2))).to(device)
-		mel_batch = torch.FloatTensor(np.transpose(mel_batch, (0, 3, 1, 2))).to(device)
+	    for p, f, c in zip(pred, frames, coords):
+		    y1, y2, x1, x2 = c
+		    p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
 
-		with torch.no_grad():
-			pred = model(mel_batch, img_batch)
+		    f[y1:y2, x1:x2] = p
+		    out.write(f)
 
-		pred = pred.cpu().numpy().transpose(0, 2, 3, 1) * 255.
-		
-		for p, f, c in zip(pred, frames, coords):
-			y1, y2, x1, x2 = c
-			p = cv2.resize(p.astype(np.uint8), (x2 - x1, y2 - y1))
+    out.release()
 
-			f[y1:y2, x1:x2] = p
-			out.write(f)
+    command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(audiofile, 'temp/result.avi', args.outfile)
+    subprocess.call(command, shell=platform.system() != 'Windows')
 
-	out.release()
-
-	command = 'ffmpeg -y -i {} -i {} -strict -2 -q:v 1 {}'.format(args.audio, 'temp/result.avi', args.outfile)
-	subprocess.call(command, shell=platform.system() != 'Windows')
-
-if __name__ == '__main__':
-	main()
+#if __name__ == '__main__':
+#	main()
